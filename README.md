@@ -42,7 +42,23 @@ This will retrieve the library.
 
 ### Usage
 
-Starting a server is easy with `evio`. Just set up your events and pass them to the `Serve` function along with the binding address(es). Each connections is represented as an `evio.Conn` object that is passed to various events to differentiate the clients. At any point you can close a client or shutdown the server by return a `Close` or `Shutdown` action from an event.
+这个库暴露出的API如下:
+
+```go
+type Engine interface {
+    Start()
+    Stop()
+    Serve() error
+    Ready() chan bool
+    Clear()
+    HasErr() bool
+    Errors() iter.Seq[error]
+}
+```
+
+详细用法可以参考 `example_test.go` 文件里的代码
+
+Starting a server is easy with `evio`. Just set up your events and pass them to the `NewEngine` function along with the binding address(es). Each connections is represented as an `evio.Conn` object that is passed to various events to differentiate the clients. At any point you can close a client or shutdown the server by return a `Close` or `Shutdown` action from an event.
 
 Example echo server that binds to port 5000:
 
@@ -53,17 +69,33 @@ import "github.com/gnuos/evio"
 
 func main() {
 	var events evio.Events
-	events.Data = func(c evio.Conn, in []byte) (out []byte, action evio.Action) {
+	events.OnData = func(c evio.Conn, in []byte) (out []byte, action evio.Action) {
 		out = in
 		return
 	}
-	if err := evio.Serve(events, "tcp://localhost:5000"); err != nil {
+
+    addresses := []string{"tcp://localhost:5000"}
+    engine, err := evio.NewEngine(events, addresses...)
+	if err != nil {
 		panic(err.Error())
 	}
+
+    engine.Serve()
+
+    // or run in background
+    // engine.Start()
+    // <- engine.Ready()
+    //
+    // defer func() {
+    //     serv.Stop()
+    //     serv.Clear()
+    // }()
+
+    // Do other things
 }
 ```
 
-Here the only event being used is `Data`, which fires when the server receives input data from a client.
+Here the only event being used is `OnData`, which fires when the server receives input data from a client.
 The exact same input data is then passed through the output return value, which is then sent back to the client. 
 
 Connect to the echo server:
@@ -76,25 +108,25 @@ $ telnet localhost 5000
 
 The event type has a bunch of handy events:
 
-- `Serving` fires when the server is ready to accept new connections.
-- `Opened` fires when a connection has opened.
-- `Closed` fires when a connection has closed.
-- `Detach` fires when a connection has been detached using the `Detach` return action.
-- `Data` fires when the server receives new data from a connection.
-- `Tick` fires immediately after the server starts and will fire again after a specified interval.
+- `OnServing` fires when the server is ready to accept new connections.
+- `OnOpened` fires when a connection has opened.
+- `OnClosed` fires when a connection has closed.
+- `OnDetach` fires when a connection has been detached using the `Detach` return action.
+- `OnData` fires when the server receives new data from a connection.
+- `OnTick` fires immediately after the server starts and will fire again after a specified interval.
 
 ### Multiple addresses
 
 A server can bind to multiple addresses and share the same event loop.
 
 ```go
-evio.Serve(events, "tcp://192.168.0.10:5000", "unix://socket")
+evio.NewEngine(events, "tcp://192.168.0.10:5000", "unix://socket")
 ```
 
 ### Ticker
 
-The `Tick` event fires ticks at a specified interval. 
-The first tick fires immediately after the `Serving` events.
+The `OnTick` event fires ticks at a specified interval. 
+The first tick fires immediately after the `OnServing` events.
 
 ```go
 events.Tick = func() (delay time.Duration, action Action){
@@ -106,10 +138,10 @@ events.Tick = func() (delay time.Duration, action Action){
 
 ## UDP
 
-The `Serve` function can bind to UDP addresses. 
+The `NewEngine` function can bind to UDP addresses. 
 
 - All incoming and outgoing packets are not buffered and sent individually.
-- The `Opened` and `Closed` events are not availble for UDP sockets, only the `Data` event.
+- The `OnOpened` and `OnClosed` events are not availble for UDP sockets, only the `OnData` event.
 
 ## Multithreaded
 
@@ -129,6 +161,11 @@ This option is only available when `events.NumLoops` is set.
 - `RoundRobin` requests that connections are distributed to a loop in a round-robin fashion.
 - `LeastConnections` assigns the next accepted connection to the loop with the least number of active connections.
 
+## Collect connections
+
+The `events.ConnDeadline` options sets the count of timeout seconds which accepted connection is inactive.
+This options use 15 as a default value. These accpted connections will be clean automatically.
+
 ## SO_REUSEPORT
 
 Servers can utilize the [SO_REUSEPORT](https://lwn.net/Articles/542629/) option which allows multiple sockets on the same host to bind to the same port.
@@ -136,7 +173,7 @@ Servers can utilize the [SO_REUSEPORT](https://lwn.net/Articles/542629/) option 
 Just provide `reuseport=true` to an address:
 
 ```go
-evio.Serve(events, "tcp://0.0.0.0:1234?reuseport=true"))
+evio.NewEngine(events, "tcp://0.0.0.0:1234?reuseport=true"))
 ```
 
 
