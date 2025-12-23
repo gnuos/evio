@@ -33,6 +33,8 @@ const (
 	Shutdown
 )
 
+const DefaultConnDeadline int64 = 15
+
 // Options are set when the client opens.
 type Options struct {
 	// TCPKeepAlive (SO_KEEPALIVE) socket option.
@@ -96,22 +98,31 @@ type Events struct {
 	// will run the server single-threaded. Setting to -1 will automatically
 	// assign this value equal to runtime.NumProcs().
 	NumLoops int
+
+	// ConnDeadline sets dealine duration that apply to every net connection
+	// This value is measured in seconds. (Time of idle)
+	ConnDeadline int64
+
 	// LoadBalance sets the load balancing method. Load balancing is always a
 	// best effort to attempt to distribute the incoming connections between
 	// multiple loops. This option is only works when NumLoops is set.
 	LoadBalance LoadBalance
+
 	// Serving fires when the server can accept connections. The server
 	// parameter has information and various utilities.
 	OnServing func(server ServerInfo) (action Action)
+
 	// Opened fires when a new connection has opened.
 	// The info parameter has information about the connection such as
 	// it's local and remote address.
 	// Use the out return value to write data to the connection.
 	// The opts return value is used to set connection options.
 	OnOpened func(c Conn) (out []byte, opts Options, action Action)
+
 	// Closed fires when a connection has closed.
 	// The err parameter is the last known connection error.
 	OnClosed func(c Conn, err error) (action Action)
+
 	// Detached fires when a connection has been previously detached.
 	// Once detached it's up to the receiver of this event to manage the
 	// state of the connection. The Closed event will not be called for
@@ -120,12 +131,15 @@ type Events struct {
 	// underlying socket connection. It can be freely used in goroutines
 	// and should be closed when it's no longer needed.
 	OnDetached func(c Conn, rwc io.ReadWriteCloser) (action Action)
+
 	// PreWrite fires just before any data is written to any client socket.
 	OnPreWrite func()
+
 	// Data fires when a connection sends the server data.
 	// The in parameter is the incoming data.
 	// Use the out return value to write data to the connection.
 	OnData func(c Conn, in []byte) (out []byte, action Action)
+
 	// Tick fires immediately after the server starts and will fire again
 	// following the duration specified by the delay return value.
 	OnTick func() (delay time.Duration, action Action)
@@ -270,14 +284,16 @@ func (is *InputStream) End(data []byte) {
 }
 
 type listener struct {
-	ln      net.Listener
-	lnaddr  net.Addr
-	pconn   net.PacketConn
-	opts    addrOpts
-	f       *os.File
-	fd      int
-	network string
-	addr    string
+	ln       net.Listener
+	lnaddr   net.Addr
+	pconn    net.PacketConn
+	connWg   sync.WaitGroup
+	stopChan chan struct{}
+	opts     addrOpts
+	f        *os.File
+	fd       int
+	network  string
+	addr     string
 }
 
 type addrOpts struct {
@@ -310,6 +326,7 @@ func NewEngine(events Events, addrs ...string) (Engine, error) {
 	for _, addr := range addrs {
 		var ln listener
 		var stdlibt bool
+
 		ln.network, ln.addr, ln.opts, stdlibt = parseAddr(addr)
 		if ln.addr == "" {
 			return nil, fmt.Errorf("invalid address %s", addr)
@@ -318,12 +335,15 @@ func NewEngine(events Events, addrs ...string) (Engine, error) {
 		if stdlibt {
 			stdlib = true
 		}
+
 		if ln.network == "unix" {
 			err := os.RemoveAll(ln.addr)
 			if err != nil {
 				return nil, err
 			}
 		}
+
+		ln.stopChan = make(chan struct{})
 
 		lns = append(lns, &ln)
 	}

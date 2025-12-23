@@ -141,7 +141,7 @@ func (s *server) Serve() error {
 			for _, c := range l.fdconns {
 				_ = loopCloseConn(s, l, c, nil)
 			}
-			l.poll.Close()
+			_ = l.poll.Close()
 		}
 
 		s.stopped <- true
@@ -199,7 +199,7 @@ func (s *server) Start() {
 func loopCloseConn(s *server, l *loop, c *conn, err error) error {
 	atomic.AddInt32(&l.count, -1)
 	delete(l.fdconns, c.fd)
-	syscall.Close(c.fd)
+	_ = syscall.Close(c.fd)
 	if s.events.OnClosed != nil {
 		switch s.events.OnClosed(c, err) {
 		case None:

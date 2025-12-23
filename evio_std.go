@@ -7,6 +7,7 @@ package evio
 import (
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net"
 	"runtime"
 	"sync"
@@ -88,6 +89,10 @@ func newStdServer(events Events, listeners []*listener) Engine {
 		} else {
 			numLoops = runtime.NumCPU()
 		}
+	}
+
+	if events.ConnDeadline == 0 {
+		events.ConnDeadline = DefaultConnDeadline
 	}
 
 	s := &stdserver{}
@@ -174,10 +179,17 @@ func (s *stdserver) Serve() error {
 		}
 		s.loopwg.Wait()
 
+		//fmt.Println("==> events stopped")
+
+		// hold on all connections finish stream
+		for _, ln := range s.lns {
+			ln.connWg.Wait()
+		}
+
 		s.stopped <- true
 		close(s.stopped)
 		atomic.StoreInt32(&s.state, 2)
-		// log.Print("==> server stopped")
+		//fmt.Println("==> server stopped")
 	}()
 
 	s.loopwg.Add(len(s.loops))
@@ -200,6 +212,11 @@ func (s *stdserver) Stop() {
 	st := atomic.LoadInt32(&s.state)
 	if st > 2 {
 		return
+	}
+
+	for _, ln := range s.lns {
+		ln.stopChan <- struct{}{}
+		close(ln.stopChan)
 	}
 
 	for _, l := range s.loops {
@@ -227,7 +244,12 @@ func (s *stdserver) stdlistenerRun(ln *listener, lnidx int) {
 		s.signalShutdown(ferr)
 		s.lnwg.Done()
 	}()
+
+	// packet buffer size is 64KB
 	var packet [0xFFFF]byte
+	var stopping atomic.Value
+	var conn net.Conn
+	var err error
 
 	for {
 		if ln.pconn != nil {
@@ -250,29 +272,37 @@ func (s *stdserver) stdlistenerRun(ln *listener, lnidx int) {
 			}
 		} else {
 			// tcp
-			conn, err := ln.ln.Accept()
-			if err != nil {
-				// 不记录errClosing触发的syscal.Accept报错
-				if !errors.Is(err, net.ErrClosed) {
-					ferr = err
+			acceptChan := make(chan struct{})
+			errorChan := make(chan struct{})
+			go func() {
+				conn, err = ln.ln.Accept()
+				if err != nil {
+					if stopping.Load() == nil && !errors.Is(err, net.ErrClosed) {
+						ferr = err
+					}
+
+					close(errorChan)
 				}
+
+				close(acceptChan)
+			}()
+
+			select {
+			case <-ln.stopChan:
+				stopping.Store(true)
+				<-acceptChan
 				return
+			case <-errorChan:
+				return
+			case <-acceptChan:
 			}
+
 			l := s.loops[int(atomic.AddUintptr(&s.accepted, 1))%len(s.loops)]
 			c := &stdconn{conn: conn, loop: l, lnidx: lnidx}
 			l.ch <- c
-			go func(c *stdconn) {
-				var packet [0xFFFF]byte
-				for {
-					n, err := c.conn.Read(packet[:])
-					if err != nil {
-						_ = c.conn.SetReadDeadline(time.Time{})
-						l.ch <- &stderr{c, err}
-						return
-					}
-					l.ch <- &stdin{c, append([]byte{}, packet[:n]...)}
-				}
-			}(c)
+
+			ln.connWg.Add(1)
+			go stdHandleConn(s, l, ln, c)
 		}
 	}
 }
@@ -361,6 +391,7 @@ loop:
 		case *stderr:
 			_ = stdloopError(s, l, v.c, v.err)
 		}
+
 		if len(l.conns) == 0 && closed {
 			break loop
 		}
@@ -372,17 +403,17 @@ func stdloopError(s *stdserver, l *stdloop, c *stdconn, err error) error {
 	closeEvent := true
 	switch atomic.LoadInt32(&c.done) {
 	case 0: // read error
-		c.conn.Close()
+		_ = c.conn.Close()
 		if err == io.EOF {
 			err = nil
 		}
 	case 1: // closed
-		c.conn.Close()
+		_ = c.conn.Close()
 		err = nil
 	case 2: // detached
 		err = nil
 		if s.events.OnDetached == nil {
-			c.conn.Close()
+			_ = c.conn.Close()
 		} else {
 			closeEvent = false
 			switch s.events.OnDetached(c, &stddetachedConn{c.conn, c.donein}) {
@@ -526,4 +557,69 @@ func stdloopAccept(s *stdserver, l *stdloop, c *stdconn) error {
 		}
 	}
 	return err
+}
+
+func stdHandleConn(s *stdserver, l *stdloop, ln *listener, c *stdconn) {
+	defer ln.connWg.Done()
+
+	var timeout = time.Duration(s.events.ConnDeadline) * time.Second
+
+	var err error
+
+	for {
+		alive := make([]byte, rand.IntN(16)+1)
+		incoming := make(chan bool, 1)
+		errChan := make(chan struct{})
+
+		var isEOF atomic.Bool
+
+		go func() {
+			var n int
+			n, err = c.conn.Read(alive[:])
+			if err != nil {
+				close(errChan)
+			} else {
+				if n > 0 && n < len(alive) {
+					isEOF.Store(true)
+				}
+
+				incoming <- true
+			}
+		}()
+
+		select {
+		case <-errChan:
+			if errors.Is(err, net.ErrClosed) {
+				_ = stdloopClose(s, l, c)
+			} else {
+				_ = c.conn.SetReadDeadline(time.Time{})
+				l.ch <- &stderr{c, err}
+			}
+
+			return
+		case <-time.After(timeout):
+			_ = stdloopClose(nil, nil, c)
+			return
+		case <-incoming:
+			close(incoming)
+			var buf []byte
+			var n int
+
+			if isEOF.Load() {
+				buf = alive
+			} else {
+				var packet [0xFFFF]byte
+				n, err = c.conn.Read(packet[:])
+				if err != nil {
+					_ = c.conn.SetReadDeadline(time.Time{})
+					l.ch <- &stderr{c, err}
+					return
+				}
+
+				buf = append(alive[:], packet[:n]...)
+			}
+
+			l.ch <- &stdin{c, buf}
+		}
+	}
 }

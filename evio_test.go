@@ -129,8 +129,10 @@ func testServe(network, addr string, unix bool, nclients, nloops int, balance Lo
 	var serv Engine
 	if unix {
 		socket := strings.Replace(addr, ":", "socket", 1)
-		os.RemoveAll(socket)
-		defer os.RemoveAll(socket)
+		_ = os.RemoveAll(socket)
+		defer func() {
+			_ = os.RemoveAll(socket)
+		}()
 		serv, err = NewEngine(events, network+"://"+addr, "unix://"+socket)
 	} else {
 		serv, err = NewEngine(events, network+"://"+addr)
@@ -154,7 +156,9 @@ func startClient(network, addr string, nloops int) {
 	if err != nil {
 		panic(err)
 	}
-	defer c.Close()
+	defer func() {
+		_ = c.Close()
+	}()
 	rd := bufio.NewReader(c)
 	msg, err := rd.ReadBytes('\n')
 	if err != nil {
@@ -291,7 +295,9 @@ func testShutdown(network, addr string, stdlib bool) {
 				go func() {
 					conn, err := net.Dial(network, addr)
 					must(err)
-					defer conn.Close()
+					defer func() {
+						_ = conn.Close()
+					}()
 					_, err = conn.Read([]byte{0})
 					if err == nil {
 						panic("expected error")
@@ -370,7 +376,9 @@ func testDetach(network, addr string, stdlib bool) {
 	events.OnDetached = func(c Conn, conn io.ReadWriteCloser) (action Action) {
 		go func() {
 			p := make([]byte, len(expected))
-			defer conn.Close()
+			defer func() {
+				_ = conn.Close()
+			}()
 			_, err := io.ReadFull(conn, p)
 			must(err)
 			_, _ = conn.Write(expected)
@@ -384,7 +392,9 @@ func testDetach(network, addr string, stdlib bool) {
 			_ = expected
 			conn, err := net.Dial(network, addr)
 			must(err)
-			defer conn.Close()
+			defer func() {
+				_ = conn.Close()
+			}()
 			_, _ = conn.Write(expected)
 			_, err = io.ReadFull(conn, p)
 			must(err)
@@ -477,7 +487,9 @@ func TestReuseInputBuffer(t *testing.T) {
 				go func() {
 					c, err := net.Dial("tcp", ":5991")
 					must(err)
-					defer c.Close()
+					defer func() {
+						_ = c.Close()
+					}()
 					_, _ = c.Write([]byte("packet1"))
 					time.Sleep(time.Second / 5)
 					_, _ = c.Write([]byte("packet2"))
@@ -512,7 +524,9 @@ func TestReuseInputBuffer(t *testing.T) {
 				go func() {
 					c, err := net.Dial("tcp", ":5992")
 					must(err)
-					defer c.Close()
+					defer func() {
+						_ = c.Close()
+					}()
 					_, _ = c.Write([]byte("packet1"))
 					time.Sleep(time.Second / 5)
 					_, _ = c.Write([]byte("packet2"))
