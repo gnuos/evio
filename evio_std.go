@@ -7,7 +7,6 @@ package evio
 import (
 	"errors"
 	"io"
-	"math/rand/v2"
 	"net"
 	"runtime"
 	"sync"
@@ -560,29 +559,27 @@ func stdloopAccept(s *stdserver, l *stdloop, c *stdconn) error {
 }
 
 func stdHandleConn(s *stdserver, l *stdloop, ln *listener, c *stdconn) {
-	defer ln.connWg.Done()
-
 	var timeout = time.Duration(s.events.ConnDeadline) * time.Second
+	incoming := make(chan bool, 1)
 
+	defer func() {
+		close(incoming)
+		ln.connWg.Done()
+	}()
+
+	var packet [0xFFFF]byte
 	var err error
 
-	for {
-		alive := make([]byte, rand.IntN(16)+1)
-		incoming := make(chan bool, 1)
-		errChan := make(chan struct{})
+	errChan := make(chan struct{})
 
-		var isEOF atomic.Bool
+	for {
+		var n int
 
 		go func() {
-			var n int
-			n, err = c.conn.Read(alive[:])
+			n, err = c.conn.Read(packet[:])
 			if err != nil {
 				close(errChan)
 			} else {
-				if n > 0 && n < len(alive) {
-					isEOF.Store(true)
-				}
-
 				incoming <- true
 			}
 		}()
@@ -601,25 +598,8 @@ func stdHandleConn(s *stdserver, l *stdloop, ln *listener, c *stdconn) {
 			_ = stdloopClose(nil, nil, c)
 			return
 		case <-incoming:
-			close(incoming)
-			var buf []byte
-			var n int
-
-			if isEOF.Load() {
-				buf = alive
-			} else {
-				var packet [0xFFFF]byte
-				n, err = c.conn.Read(packet[:])
-				if err != nil {
-					_ = c.conn.SetReadDeadline(time.Time{})
-					l.ch <- &stderr{c, err}
-					return
-				}
-
-				buf = append(alive[:], packet[:n]...)
-			}
-
-			l.ch <- &stdin{c, buf}
 		}
+
+		l.ch <- &stdin{c, append([]byte{}, packet[:n]...)}
 	}
 }
