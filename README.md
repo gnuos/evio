@@ -120,7 +120,7 @@ The event type has a bunch of handy events:
 A server can bind to multiple addresses and share the same event loop.
 
 ```go
-evio.NewEngine(events, "tcp://192.168.0.10:5000", "unix://socket")
+evio.NewEngine(events, "tcp://:5000", "unix://socket")
 ```
 
 ### Ticker

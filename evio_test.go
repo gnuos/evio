@@ -196,6 +196,11 @@ func must(err error) {
 }
 
 func TestTick(t *testing.T) {
+	defer func() {
+		_ = os.Remove("socket1")
+		_ = os.Remove("socket2")
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -252,6 +257,11 @@ func testTick(network, addr string, stdlib bool) {
 }
 
 func TestShutdown(t *testing.T) {
+	defer func() {
+		_ = os.Remove("socket1")
+		_ = os.Remove("socket2")
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -331,6 +341,11 @@ func testShutdown(network, addr string, stdlib bool) {
 }
 
 func TestDetach(t *testing.T) {
+	defer func() {
+		_ = os.Remove("socket1")
+		_ = os.Remove("socket2")
+	}()
+
 	t.Run("poll", func(t *testing.T) {
 		t.Run("tcp", func(t *testing.T) {
 			testDetach("tcp", ":4991", false)

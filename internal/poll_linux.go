@@ -65,7 +65,7 @@ func (p *Poll) Trigger(note any) error {
 
 // Wait ...
 func (p *Poll) Wait(iter func(fd int, note any) error) error {
-	events := make([]syscall.EpollEvent, 64)
+	events := make([]syscall.EpollEvent, 1024)
 	for {
 		select {
 		case <-p.done:
